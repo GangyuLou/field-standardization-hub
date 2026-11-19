@@ -1,0 +1,9 @@
+# 本机 Docker 调试用：不强制 TLS。
+# 启动：docker compose -f docker-compose.yml -f docker-compose.http.yml up --build
+services:
+  nginx:
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx/nginx.http.conf:/etc/nginx/nginx.conf:ro
+      - ./certs:/etc/nginx/certs:ro
