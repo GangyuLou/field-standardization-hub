@@ -14,7 +14,7 @@ sys.path.insert(0, str(ROOT))
 import openpyxl  # noqa: E402
 import pandas as pd  # noqa: E402
 
-from stdfield.dataworks import build_package, build_packages, sanitize_name  # noqa: E402
+from stdfield.dataworks import build_package, build_packages, import_guide, sanitize_name  # noqa: E402
 from stdfield.export import build_excel, dwd_frame  # noqa: E402
 from stdfield.generate import GenerationError, generate_bundle, generate_view_ddl  # noqa: E402
 from stdfield.match import match_field  # noqa: E402
@@ -44,6 +44,8 @@ from stdfield.validate import normalize_confirmed, validate_confirmed, validate_
 from stdfield.xlsx import read_excel, sanitize_xlsx  # noqa: E402
 
 INPUT_XLSX = ROOT / "输入文件模板.xlsx"
+if not INPUT_XLSX.exists():  # 仓库里随 raw/ 一起提交，根目录可能没有副本
+    INPUT_XLSX = ROOT / "raw" / "输入文件模板.xlsx"
 
 
 def _column(name: str, seq: int, source: str, cn: str, standard: str, **kwargs) -> dict:
@@ -336,8 +338,44 @@ class GenerateTest(unittest.TestCase):
             lifecycle=36000,
         )
         sql = files["odps_views.sql"]
-        self.assertIn("CREATE OR REPLACE VIEW v_dwd_policy_df", sql)
+        self.assertIn("CREATE OR REPLACE VIEW ${cdm_pt_prod}.v_dwd_policy_df", sql)
         self.assertNotIn("v_v_", sql)
+
+    def test_project_spaces_as_params(self) -> None:
+        cols = [
+            _column("a", 1, "policy_no", "保单号", "policy_no",
+                    目标项目空间="cdm_gp_prod", 来源表全名="ods_gp17ccs.v_src_tbl"),
+        ]
+        files = generate_bundle(
+            cols,
+            output_mode="物理表",
+            expose_partition=True,
+            view_comment_override="",
+            generate_pyodps_flag=True,
+            partition_mode="static",
+            partition_value="${bizdate}",
+            lifecycle=36000,
+        )
+        self.assertIn("CREATE TABLE IF NOT EXISTS ${cdm_gp_prod}.t1", files["odps_ddl.sql"])
+        self.assertIn("INSERT OVERWRITE TABLE ${cdm_gp_prod}.t1", files["odps_insert.sql"])
+        self.assertIn("FROM ${ods_gp17ccs}.v_src_tbl;", files["odps_insert.sql"])
+        self.assertIn("o.create_table('${cdm_gp_prod}.t1'", files["pyodps_create_table.py"])
+        self.assertNotIn("ods_gp17ccs.v_src_tbl", files["odps_insert.sql"])
+
+    def test_explicit_project_wins_over_row(self) -> None:
+        cols = [_column("a", 1, "policy_no", "保单号", "policy_no", 来源表全名="ods_gp17ccs.v_src_tbl")]
+        files = generate_bundle(
+            cols,
+            output_mode="视图",
+            expose_partition=True,
+            view_comment_override="",
+            generate_pyodps_flag=False,
+            partition_mode="static",
+            partition_value="${bizdate}",
+            lifecycle=36000,
+            project="cdm_gp_prod",
+        )
+        self.assertIn("CREATE OR REPLACE VIEW ${cdm_gp_prod}.v_t1", files["odps_views.sql"])
 
     def test_partition_exposed_by_default(self) -> None:
         cols = [
@@ -552,8 +590,21 @@ class DataWorksPackageTest(unittest.TestCase):
         node = package.nodes[0]
         self.assertEqual(node.name, "dwd_policy_df")
         self.assertEqual(node.output, "cdm_hl_prod.dwd_policy_df")
-        self.assertIn("CREATE OR REPLACE VIEW v_dwd_policy_df", node.code)
+        self.assertIn("CREATE OR REPLACE VIEW ${cdm_hl_prod}.v_dwd_policy_df", node.code)
         self.assertNotIn("v_v_", node.code)
+
+    def test_node_code_uses_project_params(self) -> None:
+        records = [
+            _column("a", 1, "policy_no", "保单号", "policy_no", 来源表全名="ods_gp17ccs.v_src_tbl"),
+        ]
+        package = build_package(records, "视图", project="cdm_gp_prod")
+        code = package.nodes[0].code
+        self.assertIn("CREATE OR REPLACE VIEW ${cdm_gp_prod}.v_t1", code)
+        self.assertIn("FROM ${ods_gp17ccs}.v_src_tbl;", code)
+        self.assertEqual(package.params, ["cdm_gp_prod", "ods_gp17ccs"])
+        guide = import_guide([package], "视图")
+        self.assertIn("cdm_gp_prod = cdm_gp_prod", guide)
+        self.assertIn("ods_gp17ccs = ods_gp17ccs", guide)
 
     def test_sanitize_name(self) -> None:
         self.assertEqual(sanitize_name("v_dim_customer_std"), "v_dim_customer_std")
@@ -945,9 +996,9 @@ class ValidateTest(unittest.TestCase):
             lifecycle=36000,
         )
         sql = files["odps_views.sql"]
-        self.assertIn("CREATE OR REPLACE VIEW v_dwd_ast_cust_eqty_cs_estim_df", sql)
+        self.assertIn("CREATE OR REPLACE VIEW ${cdm_pt_prod}.v_dwd_ast_cust_eqty_cs_estim_df", sql)
         self.assertIn("COMMENT '客户服务评价'", sql)
-        self.assertIn("FROM ods_pt17cccs.v_oracccs122_cccs_spms_customer_evaluation;", sql)
+        self.assertIn("FROM ${ods_pt17cccs}.v_oracccs122_cccs_spms_customer_evaluation;", sql)
 
         excel = build_excel(final)
         workbook = openpyxl.load_workbook(io.BytesIO(excel))

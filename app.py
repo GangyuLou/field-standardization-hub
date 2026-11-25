@@ -436,7 +436,10 @@ def _build_zip(
     if dw_packages:
         note.append("- dataworks迁移包/导入说明.txt：迁移助手导入步骤与注意事项")
     note.append("")
-    note.append("注意：视图脚本与 Excel 来自同一份确认后的映射，列顺序一致。")
+    note.append(
+        "注意：视图脚本与 Excel 来自同一份确认后的映射，列顺序一致；"
+        "脚本以 ${目标项目空间}.对象名、${来源项目空间}.来源表 引用，运行前需在调度参数中定义同名参数。"
+    )
     buffer = BytesIO()
     with ZipFile(buffer, "w", ZIP_DEFLATED) as zf:
         zf.writestr("标准化结果.xlsx", excel)
@@ -489,6 +492,7 @@ def _render_export(
                 lifecycle=config["lifecycle"],
                 split_by_table=config["split_by_table"],
                 view_name_prefix=config["view_prefix"],
+                project=cell_str(config["dw_project"]),
             )
             generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             batch_id = datetime.now().strftime("%Y%m%d_%H%M%S")

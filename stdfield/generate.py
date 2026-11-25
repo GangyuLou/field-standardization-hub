@@ -4,7 +4,15 @@ import re
 from dataclasses import dataclass
 from typing import Iterable
 
-from .util import cell_str, collapse_view_prefix, is_legal_ident, is_yes, sql_comment, with_view_prefix
+from .util import (
+    cell_str,
+    collapse_view_prefix,
+    is_legal_ident,
+    is_yes,
+    project_param,
+    sql_comment,
+    with_view_prefix,
+)
 
 
 class GenerationError(ValueError):
@@ -72,6 +80,27 @@ def _resolve_view_name(view_name: str, table: str, prefix: str) -> str:
     return with_view_prefix(table, prefix)
 
 
+def target_ref(name: str, project: str) -> str:
+    """目标对象 → ${目标项目空间}.名称；未提供项目空间时原样返回。"""
+    text = cell_str(name)
+    param = project_param(project)
+    return f"{param}.{text}" if param and text else text
+
+
+def source_ref(source_table: str, columns: list[dict]) -> str:
+    """来源表 → ${来源项目空间}.表名；无项目空间信息时原样返回。"""
+    text = cell_str(source_table)
+    if not text:
+        return text
+    if "${" in text:
+        return text
+    project, _, table = text.partition(".")
+    if table:
+        return f"{project_param(project)}.{table}"
+    db = cell_str(columns[0].get("来源库名")) if columns else ""
+    return f"{project_param(db)}.{text}" if db else text
+
+
 def _source_label(source_table: str, columns: list[dict]) -> str:
     system = cell_str(columns[0].get("来源系统缩写")) if columns else ""
     return f"{source_table}（{system}，{len(columns)} 个字段）" if system else f"{source_table}（{len(columns)} 个字段）"
@@ -83,6 +112,7 @@ def generate_view_ddl(
     columns: list[dict],
     expose_partition: bool = True,
     view_comment: str = "标准化视图",
+    project: str = "",
 ) -> str:
     """生成 CREATE OR REPLACE VIEW 脚本，列顺序与确认后的字段序号一致。"""
     cols = _sorted_columns(columns, expose_partition)
@@ -95,12 +125,13 @@ def generate_view_ddl(
     alias_width = max(len(_select_expr(c)) for c in cols)
     select_items = [_select_item(c, alias_width) for c in cols]
 
-    header = f"-- 来源表：{_source_label(source_table, columns)}"
-    sql = f"{header}\nCREATE OR REPLACE VIEW {view_name} (\n"
+    source = source_ref(source_table, columns)
+    header = f"-- 来源表：{_source_label(source, columns)}"
+    sql = f"{header}\nCREATE OR REPLACE VIEW {target_ref(view_name, project)} (\n"
     sql += ",\n".join(col_defs)
     sql += f"\n) COMMENT '{sql_comment(view_comment)}'\nAS\nSELECT\n"
     sql += ",\n".join(select_items)
-    sql += f"\nFROM {source_table};\n"
+    sql += f"\nFROM {source};\n"
     return sql
 
 
@@ -109,6 +140,7 @@ def generate_table_ddl(
     columns: list[dict],
     lifecycle: int = 36000,
     partition_fields: Iterable[str] | None = None,
+    project: str = "",
 ) -> str:
     cols = _sorted_columns(columns, expose_partition=False)
     if not cols:
@@ -121,7 +153,7 @@ def generate_table_ddl(
     comment = sql_comment(cell_str(columns[0].get("表中文描述")) or table_name)
 
     parts = [p for p in (partition_fields or []) if p]
-    sql = f"-- 来源表：{_source_label(table_name, columns)}\nCREATE TABLE IF NOT EXISTS {table_name} (\n"
+    sql = f"-- 来源表：{_source_label(table_name, columns)}\nCREATE TABLE IF NOT EXISTS {target_ref(table_name, project)} (\n"
     sql += ",\n".join(defs)
     sql += f"\n)\nCOMMENT '{comment}'"
     if parts:
@@ -137,17 +169,20 @@ def generate_insert_overwrite(
     partition_mode: str = "static",
     partition_fields: Iterable[str] | None = None,
     partition_value: str = "${bizdate}",
+    project: str = "",
 ) -> str:
     parts = [p for p in (partition_fields or []) if p]
     all_cols = _valid_columns(columns)
     if not all_cols:
         raise GenerationError(f"表 {table_name} 没有可输出的字段")
+    target = target_ref(table_name, project)
+    source = source_ref(source_table, columns)
     alias_width = max(len(_select_expr(c)) for c in all_cols)
     if not parts:
         select_items = [_select_item(c, alias_width) for c in _sorted_columns(columns, expose_partition=False)]
-        sql = f"-- 来源表：{source_table}\nINSERT OVERWRITE TABLE {table_name}\nSELECT\n"
+        sql = f"-- 来源表：{source}\nINSERT OVERWRITE TABLE {target}\nSELECT\n"
         sql += ",\n".join(select_items)
-        return sql + f"\nFROM {source_table};\n"
+        return sql + f"\nFROM {source};\n"
 
     if partition_mode == "dynamic":
         # 动态分区：分区列必须位于 SELECT 末尾，顺序与 PARTITION 声明一致
@@ -160,16 +195,16 @@ def generate_insert_overwrite(
         if missing:
             raise GenerationError(f"动态分区缺少分区列：{', '.join(missing)}，请在字段清单中补齐后再生成")
         select_items = [_select_item(c, alias_width) for c in normal + part_cols]
-        sql = f"-- 来源表：{source_table}\nINSERT OVERWRITE TABLE {table_name} PARTITION ({', '.join(parts)})\nSELECT\n"
+        sql = f"-- 来源表：{source}\nINSERT OVERWRITE TABLE {target} PARTITION ({', '.join(parts)})\nSELECT\n"
         sql += ",\n".join(select_items)
-        return sql + f"\nFROM {source_table};\n"
+        return sql + f"\nFROM {source};\n"
 
     # 静态分区：分区列不进 SELECT
     select_items = [_select_item(c, alias_width) for c in _sorted_columns(columns, expose_partition=False)]
     assignments = ", ".join(f"{p}='{sql_comment(partition_value)}'" for p in parts)
-    sql = f"-- 来源表：{source_table}\nINSERT OVERWRITE TABLE {table_name} PARTITION ({assignments})\nSELECT\n"
+    sql = f"-- 来源表：{source}\nINSERT OVERWRITE TABLE {target} PARTITION ({assignments})\nSELECT\n"
     sql += ",\n".join(select_items)
-    return sql + f"\nFROM {source_table};\n"
+    return sql + f"\nFROM {source};\n"
 
 
 def generate_pyodps(
@@ -177,6 +212,7 @@ def generate_pyodps(
     columns: list[dict],
     lifecycle: int = 36000,
     partition_fields: Iterable[str] | None = None,
+    project: str = "",
 ) -> str:
     cols = _sorted_columns(columns, expose_partition=False)
     if not cols:
@@ -197,7 +233,7 @@ def generate_pyodps(
         body += "schema = Schema(columns=columns, partitions=partitions)\n"
     else:
         body += "schema = Schema(columns=columns, partitions=None)\n"
-    body += f"o.create_table('{table_name}', schema, if_not_exists=True, lifecycle={lifecycle})\n"
+    body += f"o.create_table('{target_ref(table_name, project)}', schema, if_not_exists=True, lifecycle={lifecycle})\n"
     return body
 
 
@@ -235,8 +271,13 @@ def generate_bundle(
     lifecycle: int,
     split_by_table: bool = False,
     view_name_prefix: str = "v_",
+    project: str = "",
 ) -> dict[str, str]:
-    """由同一份确认后的映射生成全部脚本，保证 DDL/INSERT 列顺序一致。"""
+    """由同一份确认后的映射生成全部脚本，保证 DDL/INSERT 列顺序一致。
+
+    显式 project（迁移包的项目空间）优先，其次取记录里的「目标项目空间」；
+    生成的 SQL 用 ${目标项目空间}.对象名、${来源项目空间}.来源表 引用，便于跨环境迁移。
+    """
     if not confirmed:
         raise GenerationError("没有可生成的字段")
     files: dict[str, str] = {}
@@ -249,6 +290,7 @@ def generate_bundle(
     for (view_name, source_table, table, desc), cols in groups.items():
         view_name = _resolve_view_name(view_name, table, view_name_prefix)
         source_table = source_table or (f"{cell_str(cols[0].get('来源库名'))}.{table}".strip("."))
+        group_project = cell_str(project) or cell_str(cols[0].get("目标项目空间"))
         comment = view_comment_override or desc or f"标准化视图 {view_name}"
         if output_mode == "视图":
             ddl = generate_view_ddl(
@@ -257,6 +299,7 @@ def generate_bundle(
                 columns=cols,
                 expose_partition=expose_partition,
                 view_comment=comment,
+                project=group_project,
             )
             if split_by_table:
                 files[f"views/{view_name}.sql"] = ddl
@@ -267,7 +310,9 @@ def generate_bundle(
         physical = cell_str(cols[0].get("目标表名")) or table
         parts = _partition_fields(cols)
         table_parts.append(
-            generate_table_ddl(physical, cols, lifecycle=lifecycle, partition_fields=parts)
+            generate_table_ddl(
+                physical, cols, lifecycle=lifecycle, partition_fields=parts, project=group_project
+            )
         )
         insert_parts.append(
             generate_insert_overwrite(
@@ -277,10 +322,15 @@ def generate_bundle(
                 partition_mode=partition_mode,
                 partition_fields=parts,
                 partition_value=partition_value,
+                project=group_project,
             )
         )
         if generate_pyodps_flag:
-            py_parts.append(generate_pyodps(physical, cols, lifecycle=lifecycle, partition_fields=parts))
+            py_parts.append(
+                generate_pyodps(
+                    physical, cols, lifecycle=lifecycle, partition_fields=parts, project=group_project
+                )
+            )
 
     if view_parts:
         files["odps_views.sql"] = "\n".join(view_parts)
@@ -315,6 +365,7 @@ def build_targets(
     partition_value: str = "${bizdate}",
     lifecycle: int = 36000,
     view_name_prefix: str = "v_",
+    project: str = "",
 ) -> list[GeneratedTarget]:
     """按“一个目标对象一个节点”生成节点内容。
 
@@ -328,6 +379,7 @@ def build_targets(
     for (view_name, source_table, table, desc), cols in _group_rows(confirmed).items():
         view_name = _resolve_view_name(view_name, table, view_name_prefix)
         source_table = source_table or f"{cell_str(cols[0].get('来源库名'))}.{table}".strip(".")
+        group_project = cell_str(project) or cell_str(cols[0].get("目标项目空间"))
         comment = view_comment_override or desc or ""
         if output_mode == "视图":
             targets.append(
@@ -341,6 +393,7 @@ def build_targets(
                         columns=cols,
                         expose_partition=expose_partition,
                         view_comment=comment or f"标准化视图 {view_name}",
+                        project=group_project,
                     ),
                     comment=comment,
                 )
@@ -361,6 +414,7 @@ def build_targets(
                     partition_mode=partition_mode,
                     partition_fields=parts,
                     partition_value=partition_value,
+                    project=group_project,
                 ),
                 comment=comment,
             )

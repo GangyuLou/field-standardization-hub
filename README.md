@@ -122,6 +122,20 @@ streamlit run app.py
 - `Outputs/Output@data` = `<项目名>.<节点名>`
 - 侧边栏可配置目标项目空间、工作流组织方式、节点目录、owner、Cron、资源组、重跑策略
 
+### 项目空间一律用调度参数
+
+脚本和节点内容里的项目空间都写成 DataWorks 调度参数，参数名与取值同项目空间名：
+
+```sql
+CREATE OR REPLACE VIEW ${cdm_gp_prod}.v_dwd_x_df (...) AS
+SELECT ... FROM ${ods_gp17ccs}.v_src_tbl;
+```
+
+- 目标对象前缀 = `${目标项目空间}`（清单「目标数据库名」；迁移包内以包的项目空间为准）
+- 来源表前缀 = `${来源项目空间}`（来源表全名中 `.` 之前的部分）
+- `CREATE TABLE IF NOT EXISTS`、`INSERT OVERWRITE TABLE`、PyODPS `o.create_table(...)` 同样带参数
+- `导入说明.txt` 的「三、调度参数」列出包内全部参数，需在节点「调度配置 → 调度参数」中确认已定义
+
 导入步骤：DataWorks 控制台 → 数据开发 → 迁移助手 → DataWorks迁移 → 导入 → 上传 `dataworks迁移包/<项目名>_<yyyymmdd>.zip`。
 
 ## 数据目录

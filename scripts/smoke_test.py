@@ -21,6 +21,8 @@ from stdfield.roots import load_default_root_library, parse_root_library  # noqa
 from stdfield.validate import normalize_confirmed, validate_confirmed, validate_fields  # noqa: E402
 
 INPUT_XLSX = ROOT / "输入文件模板.xlsx"
+if not INPUT_XLSX.exists():  # 仓库里与 raw/ 一起提交
+    INPUT_XLSX = ROOT / "raw" / "输入文件模板.xlsx"
 
 
 def main() -> None:

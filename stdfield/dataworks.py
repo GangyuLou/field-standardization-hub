@@ -62,6 +62,7 @@ class DataWorksPackage:
     package_name: str
     project: str
     nodes: list[DataWorksNode] = field(default_factory=list)
+    params: list[str] = field(default_factory=list)
 
     @property
     def workflows(self) -> list[str]:
@@ -155,6 +156,7 @@ def build_nodes(
         partition_value=partition_value,
         lifecycle=lifecycle,
         view_name_prefix=view_name_prefix,
+        project=project,
     )
 
     used_by_workflow: dict[str, set[str]] = {}
@@ -287,12 +289,28 @@ def build_package(
                 f"{name}/src/workflows/BUSINESS_{workflow}/workflow.xml",
                 workflow_xml(workflow, group, **xml_options),
             )
-    return DataWorksPackage(zip_bytes=buffer.getvalue(), package_name=name, project=project_name, nodes=nodes)
+    return DataWorksPackage(
+        zip_bytes=buffer.getvalue(),
+        package_name=name,
+        project=project_name,
+        nodes=nodes,
+        params=project_params(confirmed, project_name),
+    )
 
 
 def project_of(row: dict, default: str = "cdm_pt_prod") -> str:
     """记录所属目标项目空间（输入清单「目标数据库名」）。"""
     return cell_str(row.get("目标项目空间")) or default
+
+
+def project_params(rows: list[dict], project: str) -> list[str]:
+    """节点脚本引用的项目空间调度参数（目标项目空间 + 各来源项目空间）。"""
+    names = {cell_str(project)}
+    for row in rows:
+        source = cell_str(row.get("来源表全名"))
+        head, _, table = source.partition(".")
+        names.add(head if table else cell_str(row.get("来源库名")))
+    return sorted(name for name in names if name)
 
 
 def build_packages(
@@ -342,11 +360,13 @@ def import_guide(packages, output_mode: str) -> str:
             f"- BUSINESS_{wf}/workflow.xml（{sum(1 for n in package.nodes if n.workflow == wf)} 个节点）"
             for wf in package.workflows
         )
+        param_text = "、".join(f"${{{name}}}" for name in package.params) or "-"
         blocks.append(
             f"""迁移包：{package.package_name}.zip
 目标项目空间：{package.project}
 节点数：{len(package.nodes)}
 节点名：目标视图名 / 表名去掉视图名前缀（v_dwd_x_df → dwd_x_df、v_v_dwd_x_df → dwd_x_df）
+项目空间参数：{param_text}
 
 包结构
 {package.package_name}/
@@ -356,6 +376,8 @@ def import_guide(packages, output_mode: str) -> str:
         )
     summary = "\n\n".join(blocks)
     total = sum(len(p.nodes) for p in items)
+    params = sorted({name for p in items for name in p.params})
+    param_lines = "\n".join(f"- {name} = {name}" for name in params) or "- 无"
     return f"""DataWorks 迁移助手导入说明
 ==============================
 
@@ -375,11 +397,16 @@ def import_guide(packages, output_mode: str) -> str:
 二、包明细
 {summary}
 
-三、注意事项
+三、调度参数
+节点 SQL 用 ${{项目空间}} 引用项目空间，请在节点「调度配置 → 调度参数」中确认以下参数已定义（参数名与取值相同）：
+{param_lines}
+
+四、注意事项
 1. 视图模式节点内容为建视图语句；物理表模式节点内容为 INSERT OVERWRITE 语句；
 2. 物理表模式请先执行产物中的 odps_ddl.sql 建表，再运行节点；
 3. 节点名已去掉全部视图名前缀 v_（视图本身仍保留单层 v_），同一工作流内重名会自动追加序号；
 4. Outputs 为「项目名.节点名」，与 project.xml 中的 name 保持一致；
 5. 多项目空间的节点已按项目空间拆成多个包，请勿把 A 项目的包导入 B 项目；
-6. 需要调整调度周期、资源组、责任人时，可在页面「DataWorks 迁移包」配置中修改后重新生成。
+6. 需要调整调度周期、资源组、责任人时，可在页面「DataWorks 迁移包」配置中修改后重新生成；
+7. 若调度参数未定义，节点运行时会因参数无法替换而失败，按第三节补齐即可。
 """

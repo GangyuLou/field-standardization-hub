@@ -69,6 +69,16 @@ def collapse_view_prefix(name: str, prefix: str = VIEW_PREFIX) -> str:
     return text
 
 
+def project_param(project: str) -> str:
+    """项目空间名 → 调度参数引用 ${项目空间}；已参数化或为空时原样返回。"""
+    name = cell_str(project)
+    if not name:
+        return ""
+    if name.startswith("${") and name.endswith("}"):
+        return name
+    return f"${{{name}}}"
+
+
 def sql_comment(text: str) -> str:
     return cell_str(text).replace("'", "''")
 
